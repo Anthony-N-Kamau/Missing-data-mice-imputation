@@ -50,17 +50,27 @@ data_complete <-
   select(Outstate, PhD, Terminal, Expend)
 
 summary(data_complete)
+
+# This is the complete ground truth data before any missingness is introduced.
+# It will be the benchmark against which every imputation method will be later 
+# compared to
 ```
 We focus on how different imputation approaches affect the linear relationship 
 between `Outstate` and `Expend`. First we inspect how the relationship looks 
 like on the complete dataset.
 
 ```{r}
+# reg of Expend on Outstate using the full complete data
 lm_complete <- lm(Expend ~ Outstate,
                   data = data_complete)
 
 summary(lm_complete)
+
+# Outstate coefficient (0.873), highly significant p <0.0000000000000002
+# This is the gold standard benchmark since no missingness exists yet
+# This is the "correct" answer every later model will be compared against 
 ```
+## Missingness Generation (SDD/MAR mechanism)
 We can now generate missingness in the variable `Expend` and `Terminal` under a 
 Seen Data Dependent (SDD) mechanism, assuming that the missingness in these 
 variables are dependent on the values of the `Outstate` and `PhD` respectively
@@ -92,28 +102,50 @@ data_missing <-
   ) |> 
   # Select variables that we will use
   select(Outstate, m_Expend, m_Terminal) 
+
+
+# Outstate (a variable that stays fully observed) is the driver of missingness 
+# in Expend, and PhD drives missingness in Terminal
 ```
 
 ## Inspection of missingness
 Inspect the missingness pattern using `ggmice` package function
 ```{r}
+# missingness pattern plot
 plot_pattern(data_missing)
+
+# 219 rows are missing both variables (Expend and Terminal)
+# 154 rows are only missing Expend variable
+# 188 rows are only missing Terminal variable
+# 216 rows have complete data on all three variables
+# In total there are 780 missing entries across the dataset i.e 
+# 373 missing in m_Expend (154 + 219)
+# 407 missing in m_Terminal (188 + 219) 
+# Out of 1,554 possible missing cells for these two variables 2.(216 + 188 + 154 + 219)
+# meaning roughly half of all values in these two columns are missing. 
+# Outstate itself has zero missing values (it's the fully-observed predictor of missingness).
 ```
 
 ## Ad Hoc Imputation Methods
 ### Listwise Deletion
-
+This drops any row with a missing value and fits the regression on the 404 complete 
+rows (777 - 373)
 ```{r}
 lm_listwise <- lm(m_Expend ~ Outstate,
                   data = data_missing)
 
 summary(lm_listwise)
 
-# The coefficient is a bit smaller, the standard error somewhat larger, so we
-# introduced some bias, and reduced the power. Both could have been expected,
+# Coefficient (0.702) vs true coefficient (0.873)
+# The coefficient is a bit smaller,
+# Standard error (0.0415) vs true standard error (0.0345)
+# the standard error somewhat larger, 
+# so we introduced some bias, and reduced the power. Both could have been expected,
 # due to how we generated missings and since we lost 373 cases.
+# R squared (0.4155 vs true R squared (0.4526). It dropped.
 ```
 ### Regression Imputation
+This replaces each missing value with its predicted value from a regression model
 ```{r}
 imp_regression <- mice(
   data   = data_missing,
@@ -121,6 +153,14 @@ imp_regression <- mice(
   m      = 1,
   maxit  = 1
 )
+
+# Coefficient (0.703). Almost identical to listwise deletion, still biased 
+# relative to the true coefficient (0.873)
+# Standard error (0.0178), much smaller that the true standard error (0.0345)
+# By imputing with no added noise, the method artificially shrinks the variability 
+# in the data, making standard error unrealistically small. In short, it is 
+# pretending to know these values more precisely than it actually does.
+
 ```
 
 `complete()` takes an object, fills in the missing data, and returns the complete
@@ -146,10 +186,15 @@ imp_regression |>
 # is how we specified the imputation model). The variation around this line
 # comes from the other variables that are also used in calculating the
 # predictions.
+# Each imputed value is a deterministic prediction with no residual variability 
+# added, all imputed points cluster tightly along the regression line rather 
+# than scattering naturally like real data would.
 ```
 
 ### Stochastic Regression Imputation
-
+This improves on plain regression imputation by adding random residual noise to each 
+predicted value, so that imputed points scatter realistically around the regression 
+line rather than sitting exactly on it.
 ```{r}
 imp_stochastic <- mice(
   data   = data_missing,
@@ -162,7 +207,11 @@ imp_stochastic <- mice(
 ```{r}
 lm_stochastic <- with(imp_stochastic, lm(m_Expend ~ Outstate))
 
-summary(lm_stochastic)
+summary(lm_stochastic) 
+
+# Coefficients (0.715), similar to other ad hoc methods. Still biased.
+# Standard error (0.0257), bigger that regression imputation (0.0178) but still 
+# smaller than the true (0.0345)
 ```
 
 ```{r}
@@ -178,6 +227,13 @@ imp_stochastic |>
 ```
 
 ### Multiple Imputation
+This creates 5 separate imputed datasets (the m=5 default), each filled in using
+Predictive Mean Matching ("pmm"), iterating 5 times (maxit=5, the default) per dataset.
+
+    - 5 imputations, method "pmm" for both m_Expend and m_Terminal
+    - Predictor matrix: shows which variables are used to impute which, for example
+      Outstate and m_Terminal are both used as predictors when imputing m_Expend, and vice versa
+      
 ```{r}
 imp_multiple <- mice(data_missing) 
 
@@ -187,16 +243,18 @@ imp_multiple
 
 
 ```{r}
+# fits regression separately on all 5 imputed datasets
 lm_multiple <- with(imp_multiple, lm(m_Expend ~ Outstate)) 
 
 # The `lm_multiple` object contains the regression summaries for each of the 5
 # datasets. The new object `lm_multiple` is actually of class `mira`, which 
 # stands for Multiply Imputed Repeated Analyses.
-# in the real data.
+
 ```
 
 
 ```{r}
+# combines those 5 sets of results using Rubin's pooling rules
 pool_multiple <- pool(lm_multiple)  
 
 summary(pool_multiple)
@@ -204,6 +262,13 @@ summary(pool_multiple)
 # These results show the regression coefficient and corresponding standard 
 # error obtained after pooling the estimates from the five regression models
 # applied on the five imputed datasets.
+
+# Coefficient (0.853), very close to the true coefficient (0.873) by far the 
+# closest of any method
+# Standard error (0.0443), actually larger than the true standard error (0.0345),
+# which is the expected and correct behavior. It honestly reflects the added 
+# uncertainty from having real missing data, rather than artificially shrinking
+# it like the ad hoc methods did.
 
 # The complete pooled object gives the relevant pooled regression coefficients 
 # and parameters, as well as the fraction of information about the coefficients
@@ -217,12 +282,14 @@ imp_multiple |>
   ggmice(aes(x = Outstate, y = m_Expend)) +
   geom_point()
 
+# imputed points blend naturally with observed points across the whole range
 # Here we take all uncertainty with respect to the imputations into account 
-# (i.e., uncertainty with respect to the values and with respect to the
-# coefficients). Moreover, we impute multiple times, so that we can assess the
-# variability between different data sets (on the level of the estimated model
-# parameters). This is often the best approach when interest is in making 
-# inferences with respect to the imputed data.
+# (i.e. uncertainty with respect to the values and with respect to the
+# coefficients). 
+# Moreover, we impute multiple times, so that we can assess the variability 
+# between different data sets (on the level of the estimated model parameters). 
+# This is often the best approach when interest is in making  inferences with 
+# respect to the imputed data.
 ```
 
 ## Comparisson
@@ -247,16 +314,16 @@ data.frame("method" = c("complete data",
 # concluded that in case of a dataset where the missingness follows the 
 # mechanism Seen Data Dependent, the estimate obtained after applying multiple
 # imputation is closest to the original estimate obtained from the complete
-# dataset. In addition, it can be concluded that the standard error obtained 
-# using multiple imputation is somewhat larger than the standard error obtain 
-# from the complete dataset. This is due to the fact that when the standard 
-# errors are pooled over the different imputations, not only the average is 
-# taken, but the variance over the differences is also incorporated (check 
-# the pooling rules for more detail), i.e. the standard error also incorporates
-# uncertainty due to the missing values. In contrast, the results obtained 
-# using listwise deletion, regression imputation and stochastic imputation all 
-# show a biased estimate, while regression imputation and stochastic 
-# imputation also show a standard error that is too low.*
+# dataset. 
+#In addition, it can be concluded that the standard error obtained using multiple
+# imputation is somewhat larger than the standard error obtain from the complete
+# dataset. This is due to the fact that when the standard errors are pooled over
+# the different imputations, not only the average is 
+# taken, but the variance over the differences is also incorporated i.e. the 
+# standard error also incorporates uncertainty due to the missing values. 
+# In contrast, the results obtained using listwise deletion, regression imputation
+# and stochastic imputation all show a biased estimate, while regression imputation
+# and stochastic imputation also show a standard error that is too low.
 
 ```
 
